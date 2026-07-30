@@ -1,0 +1,339 @@
+%% Global Sensitivity Analysis (GSA) for Cardiovascular Model using HSIC
+% This function runs a global sensitivity analysis using the
+% Hilbert-Schmidt Independence Criterion (HSIC) to determine how patient
+% parameters affect specific target model outputs (either residuals or
+% states)
+function run_cardio_GSA(PID, N_samples, AnalysisType, Target)
+
+%% 1. Load Baseline Patient Data
+% Locate the project root relative to this file's location, so paths remain
+% portable
+projectRoot = fileparts(fileparts(mfilename('fullpath')));
+
+% Dynamically add core and GSA directories to the MATLAB search path
+addpath(fullfile(projectRoot,'Core'));
+addpath(fullfile(projectRoot,'GSA'));
+
+% Load patient-specific physiological data
+data = Patient(PID);
+[pars_nominal, parsG, times, Init] = load_global(PID, data);
+
+% Append simulation settings directly to the 'data' structure
+data.parsG = parsG;
+data.Init  = Init;
+data.dt    = times.dt;
+data.T     = times.T;
+data.CC    = 5;      % Set simulation length to 5 cardiac cycles
+N_inputs = 16;       % Number of parameters being analyzed
+
+% Initialize TargetIndex to store the location of the user-requested target
+% variable
+TargetIndex = [];
+
+% Determine target structures and configurations based on the selected
+% analysis
+switch lower(AnalysisType)
+    case 'residuals'
+        CC = data.CC;
+        % List the base residual values calculated by the model
+        residualNames = { ...
+            'PpaS','PpaD','PsaS','PsaD',...
+            'PpvM','PrvD','PrvS',...
+            'VlvD','VlvS','VrvD','VrvS','CO'};
+        ResidualNames = {};
+        
+        % Generate cycle-specific names for every residual (e.g.
+        % 'PpaS_Cycle1')
+        for k = 1:length(residualNames)
+            for c = 1:CC
+                ResidualNames{end+1} = ...
+                    sprintf('%s_Cycle%d',residualNames{k},c);
+            end
+        end
+        % If the target is not the global cost function 'J', find its
+        % matching inex
+        if ~strcmp(Target,'J')
+            TargetIndex = find(strcmp(ResidualNames,Target));
+            % Throw an error if the user requests an invalid or misspelled
+            % residual
+            if isempty(TargetIndex)
+                error('Unknown residual "%s".',Target);
+            end
+        end
+
+    case 'states'
+        % No additional setup or indexing is required since state variable
+        % outputs are retrieved directly by name in the helper function
+        % (later on)
+
+    otherwise
+        % Throw an error if the user provides an invalid analysis category
+        error('AnalysisType must be "States" or "Residuals".')
+
+end
+
+%% 2. Define Parameter Bounds (e.g., +/- 25% variations) 
+% Note: SolveModel expects log-space parameters: pars_nominal = log(actual_pars)
+% We apply a +/- 25% variation directly in this log-space
+variation_fraction = 0.25; 
+lower_bounds = pars_nominal * (1 - variation_fraction);
+upper_bounds = pars_nominal * (1 + variation_fraction);
+
+% Fix potential bound inversion: if pars_nominal has negative or zero
+% values, multiplying can cause lower_bounds > upper_bounds
+% This loop swaps them if necessary to ensure lower_bounds < upper_bounds
+for idx = 1:N_inputs
+    if lower_bounds(idx) > upper_bounds(idx)
+        tmp = lower_bounds(idx);
+        lower_bounds(idx) = upper_bounds(idx);
+        upper_bounds(idx) = tmp;
+    end
+end
+
+%% 3. Define Input Generation Function 
+% Define an anonymous function that generates N samples uniformly
+% distributed between the lower and upper bounds across p parameters
+generate_X = @(N, p) lower_bounds' + (upper_bounds' - lower_bounds') .* rand(N, p);
+
+%% 4. Define Model Evaluation Wrapper
+% get_total_HSIC_indices passes an (N x N_inputs) matrix to evaluate_Y
+% We map this to evaluate_cardio_model, which loops through each sample row
+% to run SolveModel
+evaluate_Y = @(X_samples) evaluate_cardio_model(X_samples, data, AnalysisType, Target, TargetIndex);
+
+%% 5. Run Total HSIC Computations 
+fprintf('Starting %s GSA for Patient %d\n', AnalysisType, PID);
+fprintf('Target: %s\n', Target);
+fprintf('Samples: %d\n\n', N_samples);
+tic;
+
+% Compute the global sensitivity indices. Using bandwidth = 0 selects the
+% Median heuristic as a robust default bandwidth for the HSIC Gaussian
+% kernel
+T_hsic_med = get_total_HSIC_indices(generate_X, evaluate_Y, N_samples, N_inputs, 0);
+
+exec_time = toc;
+fprintf('GSA complete in %.2f seconds.\n', exec_time);
+
+%% 6. Plot the Global Sensitivities 
+% Parameter names mapping to the 16 model inputs
+names = {'Rpul','Rmval','Raval','Rsys','Rtval','Rpval', ... 
+         'Cpv','Csa','Csv','Cpa', ... 
+         'ElvM','Elvm','ErvM','Ervm','TC','TR'};
+
+% Sort the sensitivity results in descending order to plot ranked
+% parameters
+[sorted_hsic, sort_idx] = sort(T_hsic_med, 'descend');
+
+% Configure and render the bar plot
+fig = figure('Name', 'Global Sensitivity Analysis (HSIC)');
+bar(1:N_inputs, sorted_hsic, 'FaceColor', [0.2 0.6 0.8]);
+set(gca, 'TickLabelInterpreter', 'latex');
+xlim([0.5 (N_inputs + 0.5)]);
+xticks(1:N_inputs);
+set(gca, 'XTickLabel', names(sort_idx), 'FontSize', 14);
+xtickangle(45);
+xlabel('Parameters (Ranked Globally)', 'FontSize', 14, 'FontWeight', 'bold');
+ylabel('Total HSIC Sensitivity Index', 'FontSize', 14, 'FontWeight', 'bold');
+
+% Format underscore characters for LaTeX interpreter compatibility in the
+% plot title
+displayTarget = strrep(Target,'_','\_');
+title(sprintf('Patient %d: %s GSA (%i Samples)\nTarget: %s', PID, AnalysisType, N_samples, displayTarget), 'FontSize', 14, 'FontWeight', 'bold')
+
+%% 7. Automated Spreadsheet Export 
+% Dynamically determine folder destinations based on the AnalysisType
+switch lower(AnalysisType)
+
+    case 'states'
+
+        GSAresultsFolder = 'PatientDataGSA_States';
+        GSAfigureFolder = 'PatientFiguresGSA_States';
+
+    case 'residuals'
+
+        GSAresultsFolder = 'PatientDataGSA_Residuals';
+        GSAfigureFolder = 'PatientFiguresGSA_Residuals';
+end
+
+
+% Create the destination folder on disk if it does not exist yet
+if ~exist(GSAresultsFolder,'dir')
+    mkdir(GSAresultsFolder);
+end
+
+% Workbook Path 1: Combined results for a single patient across different
+% targets
+excelFile1 = fullfile(GSAresultsFolder, sprintf('Patient_%d_%d_Samples.xlsx', PID, N_samples));
+
+% Format current GSA run as a table row
+ResultRow = cell2table([{Target}, num2cell(T_hsic_med)], ...
+    'VariableNames', [{'Target'}, names]);
+
+% If the workbook already exists, read it and either update the existing
+% target row or append a new one
+if isfile(excelFile1)
+    ExistingTable = readtable(excelFile1);
+    % Find if the current target has already been calculated and recorded
+    idx = strcmp(ExistingTable.Target, Target);
+    if any(idx)
+        ExistingTable(idx,:) = ResultRow;
+    else
+        ExistingTable = [ExistingTable; ResultRow];
+    end
+    % Define the target row sorting order for presentation cleanliness
+    switch lower(AnalysisType)
+
+    case 'residuals'
+        targetOrder = [{'J'}, ResidualNames];
+
+    case 'states'
+        targetOrder = { ...
+            'Ppv','Plv','Psa','Psv','Prv','Ppa',...
+            'Vpv','Vlv','Vsa','Vsv','Vrv','Vpa',...
+            'Qpul','Qmval','Qaval','Qtval','Qpval','Qsys',...
+            'VlvM','Vlvm','VrvM','Vrvm',...
+            'CO','SV'};
+end
+    
+    % Sort workbook rows according to the targetOrder rules defined above
+    [~, order] = ismember(ExistingTable.Target, targetOrder);
+    % Handle potential edge-case targeets not defined in sorting list (push
+    % to bottom)
+    order(order == 0) = inf;
+    % Sort the table into the desired order
+    [~, idx] = sort(order);
+    ExistingTable = ExistingTable(idx,:);
+    writetable(ExistingTable, excelFile1);
+
+else
+    % Create the spreadsheet fresh if this is the first run for this
+    % patient and sample size
+    writetable(ResultRow, excelFile1);
+end
+
+fprintf('GSA results successfully exported to %s\n', excelFile1);
+
+% Workbook Path 2: Grouped patient comparison spreadsheet for a specific
+% target/sample size
+switch lower(AnalysisType)
+    case 'residuals'
+        excelFile2 = fullfile(GSAresultsFolder, ...
+            sprintf('Residual_%s_%d_Samples.xlsx', Target, N_samples));
+    
+    case 'states'
+        excelFile2 = fullfile(GSAresultsFolder, ...
+            sprintf('State_%s_%d_Samples.xlsx', Target, N_samples));
+
+end
+
+% Format table row using Patient ID as the primary key
+ResultRow = cell2table([{PID}, num2cell(T_hsic_med)], ...
+    'VariableNames', [{'Patient'}, names]);
+% If this target comparison workbook exists, append or update this
+% patient's row
+if isfile(excelFile2)
+    ExistingTable = readtable(excelFile2);
+    % Check if this patient already has a row in the workbook
+    idx = ExistingTable.Patient == PID;
+    if any(idx)
+        ExistingTable(idx,:) = ResultRow;
+    else
+        ExistingTable = [ExistingTable; ResultRow];
+    end
+    % Keep the workbook organized by sorting ascending by Patient ID
+    ExistingTable = sortrows(ExistingTable, 'Patient');
+    writetable(ExistingTable, excelFile2);
+
+else
+
+    % Create the spreadsheet fresh if this is the first run for this
+    % patient and sample size
+    writetable(ResultRow, excelFile2);
+
+end
+
+fprintf('GSA results successfully exported to %s\n', excelFile2);
+
+%% 8. Automated Figure Saving Block 
+outputFolder = GSAfigureFolder;
+% Ensure the figure output directory exists
+if ~exist(outputFolder, 'dir')
+    mkdir(outputFolder);
+end
+% Create a filename-safe version of the target output
+saveTarget = Target;
+% Generate a unique filename using patient, analysis target, and sample
+% data
+switch lower(AnalysisType)
+
+    case 'residuals'
+        imageName = sprintf( ...
+            'Patient_%d_Residual_%s_%d_Samples.png', ...
+            PID, saveTarget, N_samples);
+    
+    case 'states'
+        imageName = sprintf( ...
+            'Patient_%d_State_%s_%d_Samples.png', ...
+            PID, saveTarget, N_samples);
+
+end
+
+imagePath = fullfile(outputFolder, imageName);
+
+% Save the plotted GSA bar chart as a PNG file using its active handle
+saveas(fig, imagePath);
+
+fprintf('Figure successfully exported to %s\n', imagePath);    
+
+end 
+
+%% 9. Helper Function for Matrix Vectorization 
+% Iteratively runs the core cardiovascular model (SolveModel) over every
+% row in the generated parameter sample matrix (X_samples)
+function Y = evaluate_cardio_model(X_samples, data, AnalysisType, Target, TargetIndex)
+N = size(X_samples,1);
+Y = zeros(N,1);
+% Loop through each parameter row and run the differential equation model
+for i = 1:N
+    % Define standard ODE numerical solver limits for model consistency
+    data.ODE_TOL  = 1e-5;
+    data.DIFF_INC = sqrt(data.ODE_TOL);
+    current_pars = X_samples(i,:);
+    try
+        % Solve the cardiovascular ODE model with current parameter
+        % settings
+        [rout,J,~,~,States,~,~] = SolveModel(current_pars,data);
+        switch lower(AnalysisType)
+            case 'residuals'
+                if strcmp(Target,'J')
+                    % Store the overal objective cost function evaluation
+                    Y(i) = J;
+                else
+                    % Extract the target residual value matching the
+                    % requested index
+                    Y(i) = rout(TargetIndex);
+                end
+
+            case 'states'
+                % Confirm that the requested state name actually exists in
+                % the structure
+                if ~isfield(States,Target)
+                    error('Unknown state "%s".',Target);
+                end
+                % Store the final time step value of the requested state
+                % variable
+                Y(i) = States.(Target)(end);
+
+            otherwise
+                error('Unknown AnalysisType.');
+        end
+
+    catch ME
+        % Print an error if SolveModel crashes on a parameter set
+        fprintf('Sample %d failed:\n',i)
+        disp(ME.message)
+        rethrow(ME)
+    end
+end
+end

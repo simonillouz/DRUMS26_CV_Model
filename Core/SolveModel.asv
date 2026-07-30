@@ -1,0 +1,518 @@
+function [rout, J, tAll, MSE, States, S_history, S_time] = SolveModel(pars,data)
+
+% global ODE_TOL 
+data.ODE_TOL  = 1e-10;              %ODE_TOL;
+data.DIFF_INC = sqrt(data.ODE_TOL); %DIFF_INC;
+
+Init = data.Init;
+pars = exp(pars);
+
+% Default outputs for runs that do not compute analytical sensitivities
+S_history = [];
+S_time = [];
+
+% Resistances
+Rpul   = pars(1);
+Rmval  = pars(2);
+Raval  = pars(3);
+Rsys   = pars(4);
+Rtval  = pars(5);
+Rpval  = pars(6);
+
+% Compliances
+Cpv = pars(7);
+Csa	= pars(8);
+Csv	= pars(9);
+Cpa = pars(10);
+
+% Heart parameters
+ElvM = pars(11);
+Elvm = pars(12);
+ErvM = pars(13);
+Ervm = pars(14);
+
+TC = pars(15); 
+TR = pars(16);
+
+% Constant parameters
+parsG = data.parsG;
+
+%Initialize empty vectors for solutions for pressure
+PpvSa  = []; 
+PlvSa  = []; 
+PsaSa  = []; 
+PsvSa  = [];
+PrvSa  = [];
+PpaSa  = [];
+
+PSrvSa  = [];
+PSrvSad = [];
+PDrvSa  = []; 
+PDrvSad = [];
+PSpaSa  = []; 
+PSpaSad = []; 
+PDpaSa  = []; 
+PDpaSad = []; 
+PMpvSa  = [];
+PMpvSad = [];
+PMsvSa  = [];
+PMsvSad = [];
+PSsaSa  = [];
+PSsaSad = [];
+PDsaSa  = [];
+PDsaSad = [];
+
+%Initialize empty vectors for solutions for volume
+VpvSa  = []; 
+VlvSa  = []; 
+VsaSa  = []; 
+VsvSa  = [];
+VrvSa  = [];
+VpaSa  = [];
+
+VDlvSa  = [];
+VDlvSad = [];
+VSlvSa  = [];
+VSlvSad = [];
+VDrvSa  = [];
+VDrvSad = [];
+VSrvSa  = [];
+VSrvSad = [];
+
+%Initialize empty vectors for solutions for flow
+QpulSa  = [];
+QmvalSa = [];
+QavalSa = []; 
+QtvalSa = []; 
+QpvalSa = []; 
+QsysSa  = []; 
+
+COSa  = [];
+COSad = [];
+SVSa  = [];
+SVSad = [];
+
+options=odeset('RelTol', data.ODE_TOL, 'AbsTol', data.ODE_TOL);  %sets how accurate the ODE solver is
+
+T  = data.T;
+dt = data.dt;
+notconv    = true;
+conv_tol   = 1e-6;
+cycleCount = 0;
+convCyc    = 0;
+CC         = data.CC;
+
+tAll    = [];
+VpvPrev = [];
+sse     = 1;
+while cycleCount - convCyc < CC || notconv
+
+    clear Vpv Vlv Vsa Vsv Vrv Vpa 
+    clear Ppv Plv Psa Psv Prv Ppa Elv Erv
+    clear Qpul Qmval Qaval Qtval Qpval Qsys
+
+    tdc  = cycleCount*T:dt:(cycleCount+1)*T;
+    tAll = [tAll, tdc(1:end-1)];
+    
+    %Solve the ODEs (RHS in modelBasic.m)
+    sol = ode15s(@modelBasic,tdc,Init,options,pars,parsG, tdc(1));
+    sols= deval(sol,tdc); %takes the solutions at each time step in the period
+    
+    Vpv  = sols(1,:); 
+    Vlv  = sols(2,:); 
+    Vsa  = sols(3,:); 
+    Vsv  = sols(4,:); 
+    Vrv  = sols(5,:);
+    Vpa  = sols(6,:);
+    
+    Ppv = (Vpv-parsG.VpvU)/Cpv;
+    Psa = (Vsa-parsG.VsaU)/Csa;
+    Psv = (Vsv-parsG.VsvU)/Csv;
+    Ppa = (Vpa-parsG.VpaU)/Cpa;
+
+    %Determines the elasticity of the left ventricle at each period timestep
+    for j = 1:length(tdc)
+        Elv(j) = Elastance(tdc(j)-tdc(1),ElvM, Elvm, TC, TR);
+    
+        %Pressure of the left ventricle
+        Plv(1,j) = Elv(j).*(Vlv(1,j) - parsG.VlvU); 
+
+        % flow into LH (mitral valve)
+        if Ppv(1,j) > Plv(1,j)
+            Qmval(1,j) = (Ppv(1,j)-Plv(1,j))/Rmval;
+        else
+            Qmval(1,j) = 0;
+            
+        end
+        % flow out of LH (aortic valve)
+        if Plv(1,j) > Psa(1,j)
+            Qaval(1,j) = (Plv(1,j)-Psa(1,j))/Raval;
+        else
+            Qaval(1,j) = 0;
+        end
+            
+        Erv(j) = Elastance(tdc(j)-tdc(1),ErvM, Ervm, TC, TR);
+    
+        %Pressure of the right ventricle
+        Prv(1,j) = Erv(j).*(Vrv(1,j) - parsG.VrvU); 
+
+       % flow into RH (tricuspid valve)
+        if Psv(1,j) > Prv(1,j)
+            Qtval(1,j) = (Psv(1,j)-Prv(1,j))/Rtval;
+        else
+            Qtval(1,j) = 0;
+        end
+        % flow out of RH (pulmonary valve)
+        if Prv(1,j) > Ppa(1,j)
+            Qpval(1,j) = (Prv(1,j)-Ppa(1,j))/Rpval;
+        else
+            Qpval(1,j) = 0;
+        end
+    end
+
+    %Flows defined by Ohm's Law
+    Qpul = (Ppa - Ppv)/Rpul;
+    Qsys = (Psa - Psv)/Rsys;
+
+    % Adds to pressure solution vectors every iteration of the loop
+    PpvSa  = [PpvSa  Ppv(1:end-1)];
+    PlvSa  = [PlvSa  Plv(1:end-1)];
+    PsaSa  = [PsaSa  Psa(1:end-1)];
+    PsvSa  = [PsvSa  Psv(1:end-1)];
+    PrvSa  = [PrvSa  Prv(1:end-1)]; 
+    PpaSa =  [PpaSa  Ppa(1:end-1)];
+
+    %Save pressures for which we have data
+    PSrvSa  = [PSrvSa max(Prv)];
+    PSrvSad = [PSrvSad data.PrvS];
+    
+    PDrvSa  = [PDrvSa min(Prv)]; 
+    PDrvSad = [PDrvSad data.PrvD];
+
+    PSpaSa  = [PSpaSa  max(Ppa)]; 
+    PSpaSad = [PSpaSad data.PpaS]; 
+
+    PDpaSa  = [PDpaSa  min(Ppa)]; 
+    PDpaSad = [PDpaSad data.PpaD]; 
+
+    PMpvSa  = [PMpvSa trapz(tdc,Ppv)/T];
+    PMpvSad = [PMpvSad data.Ppv];
+
+    PMsvSa  = [PMsvSa trapz(tdc,Ppv)/T];
+    PMsvSad = [PMsvSad data.Psv];
+
+    PSsaSa  = [PSsaSa  max(Psa)];
+    PSsaSad = [PSsaSad data.PsaS];
+
+    PDsaSa  = [PDsaSa min(Psa)];
+    PDsaSad = [PDsaSad data.PsaD];
+    
+    % Adds to volume solution vectors every iteration of the loop
+    VpvSa  = [VpvSa  Vpv(1:end-1)];
+    VlvSa  = [VlvSa  Vlv(1:end-1)];
+    VsaSa  = [VsaSa  Vsa(1:end-1)];
+    VsvSa  = [VsvSa  Vsv(1:end-1)];
+    VrvSa  = [VrvSa  Vrv(1:end-1)]; 
+    VpaSa =  [VpaSa  Vpa(1:end-1)];
+    
+    %Save volumes for which we have data
+    VDlvSa  = [VDlvSa   max(Vlv)];
+    VDlvSad = [VDlvSad  data.VlvM];
+    VSlvSa  = [VSlvSa   min(Vlv)];
+    VSlvSad = [VSlvSad  data.Vlvm];
+  
+    VDrvSa  = [VDrvSa   max(Vrv)];
+    VDrvSad = [VDrvSad  data.VrvM];
+    VSrvSa  = [VSrvSa   min(Vrv)];
+    VSrvSad = [VSrvSad  data.Vrvm];
+   
+    % Adds to flow solution vectors every iteration of the loop
+    QpulSa  = [QpulSa   Qpul(1:end-1)];
+    QmvalSa = [QmvalSa  Qmval(1:end-1)];
+    QavalSa = [QavalSa  Qaval(1:end-1)];
+    QtvalSa = [QtvalSa  Qtval(1:end-1)];
+    QpvalSa = [QpvalSa  Qpval(1:end-1)];
+    QsysSa  = [QsysSa   Qsys(1:end-1)];
+    
+    %Save cardiac output 
+    CO    = trapz(tdc,Qsys)/T*60/1000;
+    SV    = CO/data.HR*1000;
+    COSa  = [COSa CO];
+    COSad = [COSad data.CO];
+    SVSa  = [SVSa SV];
+    SVSad = [SVSad data.SV];
+
+    Init = [Vpv(end) Vlv(end) Vsa(end) Vsv(end) Vrv(end) Vpa(end)];
+
+    % sum of squared pointwise diffs / number of terms
+    if isempty(VpvPrev)
+        sse = 1;
+    else
+        sse = sum((Vpv - VpvPrev).^2)/numel(Vpv);
+
+        if sse < conv_tol
+            notconv = false;
+        end  
+    end
+    VpvPrev = Vpv;
+    cycleCount = cycleCount + 1;
+end
+
+%After for loop is done, saves last value for each of these vectors
+tAll = [tAll, tAll(end)+dt];
+
+PpvSa  = [PpvSa  Ppv(end)]';
+PlvSa  = [PlvSa  Plv(end)]';
+PsaSa  = [PsaSa  Psa(end)]';
+PsvSa  = [PsvSa  Psv(end)]';
+PrvSa  = [PrvSa  Prv(end)]'; 
+PpaSa =  [PpaSa  Ppa(end)]';
+
+VpvSa  = [VpvSa  Vpv(end)]';
+VlvSa  = [VlvSa  Vlv(end)]';
+VsaSa  = [VsaSa  Vsa(end)]';
+VsvSa  = [VsvSa  Vsv(end)]';
+VrvSa  = [VrvSa  Vrv(end)]'; 
+VpaSa  = [VpaSa  Vpa(end)]';
+
+QpulSa  = [QpulSa   Qpul(end)]';
+QmvalSa = [QmvalSa  Qmval(end)]';
+QavalSa = [QavalSa  Qaval(end)]';
+QtvalSa = [QtvalSa  Qtval(end)]';
+QpvalSa = [QpvalSa  Qpval(end)]';
+QsysSa  = [QsysSa   Qsys(end)]';
+
+States.Ppv   = PpvSa;
+States.Plv   = PlvSa;
+States.Psa   = PsaSa;
+States.Psv   = PsvSa;
+States.Prv   = PrvSa;
+States.Ppa   = PpaSa;
+States.Vpv   = VpvSa;
+States.Vlv   = VlvSa;
+States.Vsa   = VsaSa;
+States.Vsv   = VsvSa;
+States.Vrv   = VrvSa;
+States.Vpa   = VpaSa;
+States.Qpul  = QpulSa;
+States.Qmval = QmvalSa;
+States.Qaval = QavalSa;
+States.Qtval = QtvalSa;
+States.Qpval = QpvalSa;
+States.Qsys  = QsysSa;
+
+States.VlvM  = VDlvSa;
+States.Vlvm  = VSlvSa;
+States.VrvM  = VDrvSa;
+States.Vrvm  = VSrvSa;
+States.CO    = COSa;
+States.SV    = SVSa;
+
+%% Numerical Finite Difference Sensitivity Approximation Framework
+% Computes state-by-state dynamic derivative trends (d(dV_j/dt)/dtheta)
+global DIFF_INC;
+
+if ~exist('DIFF_INC', 'var') || isempty(DIFF_INC)
+    DIFF_INC = 1e-5;
+end    
+
+% Reconstruct history windows directly from internal variables
+num_steps_win = round(data.T * data.CC / data.dt);
+end_idx_hist = length(VpvSa);
+start_idx_hist = end_idx_hist - num_steps_win + 1;
+
+% If the arrays are shorter than the window, catch it by taking all elements
+if start_idx_hist < 1
+    start_idx_hist = 1;
+    num_steps_win = end_idx_hist;
+end
+
+Vpv_hist = VpvSa(start_idx_hist:end_idx_hist);
+Vlv_hist = VlvSa(start_idx_hist:end_idx_hist);
+Vsa_hist = VsaSa(start_idx_hist:end_idx_hist);
+Vsv_hist = VsvSa(start_idx_hist:end_idx_hist);
+%if ~exist('Vsv_hist','var') || isempty(Vsv_hist), Vsv_hist = VsvSa(start_idx_hist:end_idx_hist); end
+Vrv_hist = VrvSa(start_idx_hist:end_idx_hist);
+Vpa_hist = VpaSa(start_idx_hist:end_idx_hist);
+
+% Capture the exact raw simulation timeline slice for these historical
+% volumes
+t_hist = tAll(start_idx_hist:end_idx_hist);
+
+% Only compute analytical sensitivities when requested
+computeAnalytical = isfield(data,'computeAnalyticalSens') && data.computeAnalyticalSens;
+
+if computeAnalytical
+    % % Continue sensitivity iterations...
+    S_history = zeros(6, 16, num_steps_win);
+    
+    % Force pars_nominal to be a vertical column vector [16 x 1]
+    pars_nominal = pars(:);
+    
+    % Extract and force parsG to be a vertical column vector [6 x 1]
+    parsG_raw = [parsG.VpvU, parsG.VlvU, parsG.VsaU, parsG.VsvU, parsG.VrvU, parsG.VpaU];
+    parsG_vector = parsG_raw(:);
+    
+    % Step size for finding loacl heart parameter derivatives numerically
+    h_el = 1e-5;
+    
+    for j = 1:num_steps_win
+        % Gather your 6 active historical states for this specific time step
+        X_raw = [Vpv_hist(j); Vlv_hist(j); Vsa_hist(j); Vsv_hist(j); Vrv_hist(j); Vpa_hist(j)];
+        X_vector = X_raw(:);
+    
+        % Reconstruct the local heart cycle time point to compute elastance values
+        cycle_t = mod(t_hist(j), data.T);
+        Elv_j = Elastance(cycle_t, pars_nominal(11), pars_nominal(12), pars_nominal(15), pars_nominal(16));
+        Erv_j = Elastance(cycle_t, pars_nominal(13), pars_nominal(14), pars_nominal(15), pars_nominal(16));
+        
+        % Call your analytical 6x12 symbolic sensitivity matrix function 
+        % (Columns 1-10: circuit, Column 11: dF/dElv, Column 12: dF/dErv)
+        cd ../SensAnalytical/
+        
+        S_symbolic = get_SensitivityMatrix(X_vector, pars_nominal', parsG_vector', Elv_j, Erv_j);
+        
+        
+        % Build out the complete 6x16 Parameter matrix mapping
+        J_theta = zeros(6, 16);
+        J_theta(:, 1:10) = S_symbolic(:, 1:10); % Copy over Rpul, Rmval, Raval, Rsys, Rtval, Rpval, Cpv, Csa, Csv, Cpa
+        
+        % if j == round(num_steps_win/2)
+        %     disp('J_theta at mid-cycle:')
+        %     disp(J_theta)
+        % end
+
+        % 2. CHAIN RULE: Approximate local partial derivatives of Elastance(t)
+        % Left Ventricle (Parameter 11: ElvM, Parameter 12: Elvm)
+        cd ../Core
+        
+        dElv_dElvM = (Elastance(cycle_t, pars_nominal(11)+h_el, pars_nominal(12), pars_nominal(15), pars_nominal(16)) - Elv_j) / h_el;
+        dElv_dElvm = (Elastance(cycle_t, pars_nominal(11), pars_nominal(12)+h_el, pars_nominal(15), pars_nominal(16)) - Elv_j) / h_el;
+        
+        % Right Ventricle (Parameter 13: ErvM, Parameter 14: Ervm)
+        dErv_dErvM = (Elastance(cycle_t, pars_nominal(13)+h_el, pars_nominal(14), pars_nominal(15), pars_nominal(16)) - Erv_j) / h_el;
+        dErv_dErvm = (Elastance(cycle_t, pars_nominal(13), pars_nominal(14)+h_el, pars_nominal(15), pars_nominal(16)) - Erv_j) / h_el;
+        
+        % Timing Parameters (Parameter 15: TC, Parameter 16: TR) affect BOTH ventricles
+        dElv_dTC = (Elastance(cycle_t, pars_nominal(11), pars_nominal(12), pars_nominal(15)+h_el, pars_nominal(16)) - Elv_j) / h_el;
+        dErv_dTC = (Elastance(cycle_t, pars_nominal(13), pars_nominal(14), pars_nominal(15)+h_el, pars_nominal(16)) - Erv_j) / h_el;
+        
+        dElv_dTR = (Elastance(cycle_t, pars_nominal(11), pars_nominal(12), pars_nominal(15), pars_nominal(16)+h_el) - Elv_j) / h_el;
+        dErv_dTR = (Elastance(cycle_t, pars_nominal(13), pars_nominal(14), pars_nominal(15), pars_nominal(16)+h_el) - Erv_j) / h_el;
+        
+        % Map out columns 11-16 using the Chain Rule (dF/dParam = dF/dE * dE/dParam)
+        J_theta(:, 11) = S_symbolic(:, 11) * dElv_dElvM;
+        J_theta(:, 12) = S_symbolic(:, 11) * dElv_dElvm;
+        J_theta(:, 13) = S_symbolic(:, 12) * dErv_dErvM;
+        J_theta(:, 14) = S_symbolic(:, 12) * dErv_dErvm;
+        
+        % TC and TR sum up their shared impacts across both ventricles
+        J_theta(:, 15) = S_symbolic(:, 11) * dElv_dTC + S_symbolic(:, 12) * dErv_dTC;
+        J_theta(:, 16) = S_symbolic(:, 11) * dElv_dTR + S_symbolic(:, 12) * dErv_dTR;
+    
+        % Account for the log parameter scale optimization: dF/d(log(theta)) = dF/dtheta * theta
+        % This handles the 'pars = exp(pars)' scale adjustment automatically.
+        for p = 1:16
+            J_theta(:, p) = J_theta(:, p) * pars_nominal(p);
+        end
+        
+        % 6. Store directly into the history matrix array
+        S_history(:, :, j) = J_theta;
+    end
+end
+
+% Guarantee S_time is explicitly defined, flat, and matches num_steps_win exactly
+if length(tAll) >= num_steps_win
+    S_time = tAll(end - num_steps_win + 1 : end);
+else
+    % Fallback if tAll is short
+    S_time = linspace(0, data.T * data.CC, num_steps_win);
+end
+S_time = S_time(:)'; % Force row vector to perfectly align with sizing rules
+%%
+
+%squared errors for each of the parameters with data. Order:
+rPpaS = (PSpaSa(end-CC:end)-PSpaSad(end-CC:end))'./PSpaSad(end-CC:end)'/sqrt(CC);
+rPpaD = (PDpaSa(end-CC:end)-PDpaSad(end-CC:end))'./PDpaSad(end-CC:end)'/sqrt(CC);
+rPsaS = (PSsaSa(end-CC:end)-PSsaSad(end-CC:end))'./PSsaSad(end-CC:end)'/sqrt(CC);
+rPsaD = (PDsaSa(end-CC:end)-PDsaSad(end-CC:end))'./PDsaSad(end-CC:end)'/sqrt(CC);
+rPpvM = (PMpvSa(end-CC:end)-PMpvSad(end-CC:end))'./PMpvSad(end-CC:end)'/sqrt(CC);
+rPrvD = (PDrvSa(end-CC:end)-PDrvSad(end-CC:end))'./PDrvSad(end-CC:end)'/sqrt(CC);
+rPrvS = (PSrvSa(end-CC:end)-PSrvSad(end-CC:end))'./PSrvSad(end-CC:end)'/sqrt(CC);
+PrvSMSE = rPrvS'*rPrvS;
+PrvDMSE = rPrvD'*rPrvD;
+PpaSMSE = rPpaS'*rPpaS;
+PpaDMSE = rPpaD'*rPpaD;
+PpvMMSE = rPpvM'*rPpvM;
+PsaSMSE = rPsaS'*rPsaS;
+PsaDMSE = rPsaD'*rPsaD;
+
+rVlvD = (VDlvSa(end-CC:end)-VDlvSad(end-CC:end))'./VDlvSad(end-CC:end)'/sqrt(CC);
+rVlvS = (VSlvSa(end-CC:end)-VSlvSad(end-CC:end))'./VSlvSad(end-CC:end)'/sqrt(CC);
+rVrvD = (VDrvSa(end-CC:end)-VDrvSad(end-CC:end))'./VDrvSad(end-CC:end)'/sqrt(CC);
+rVrvS = (VSrvSa(end-CC:end)-VSrvSad(end-CC:end))'./VSrvSad(end-CC:end)'/sqrt(CC);
+VlvDMSE = rVlvD'*rVlvD;
+VlvSMSE = rVlvS'*rVlvS;
+VrvDMSE = rVrvD'*rVrvD;
+VrvSMSE = rVrvS'*rVrvS;
+
+rCO   = (COSa(end-CC:end)-COSad(end-CC:end))'./COSad(end-CC:end)'/sqrt(CC);
+rSV   = (SVSa(end-CC:end)-SVSad(end-CC:end))'./SVSad(end-CC:end)'/sqrt(CC);
+COMSE = rCO'*rCO;
+SVMSE = rSV'*rSV;
+
+MSE  = [PpaSMSE PpaDMSE PsaSMSE PsaDMSE PpvMMSE PrvDMSE PrvSMSE VrvDMSE VrvSMSE VlvDMSE VlvSMSE COMSE];
+rout = [rPpaS'  rPpaD'  rPsaS'  rPsaD'  rPpvM' rPrvD'  rPrvS' rVlvD' rVlvS' rVrvD' rVrvS' rCO']';
+%rout = [rPpaS'  rPpaD'  rPsaS'  rPsaD'  rPpvM' rPrvD'  rPrvS' rVlvD' rVlvS' rVrvD' rVrvS']';
+J = rout'*rout;
+
+if computeAnalytical
+    assignin('base', 'S_history', S_history);
+    assignin('base', 'S_time', S_time);
+end     
+end 
+
+%% Helper Sub-Function: Evaluates system rates of change dynamically for finite differences
+function [dVpv, dVlv, dVsa, dVsv, dVrv, dVpa] = EvaluateSystemDerivatives(pars, Vpv, Vlv, Vsa, Vsv, Vrv, Vpa, t_hist, data)
+    Rpul = pars(1);  Rmval = pars(2); Raval = pars(3);
+    Rsys = pars(4);  Rtval = pars(5); Rpval = pars(6);
+    Cpv  = pars(7);  Csa   = pars(8); Csv   = pars(9); Cpa = pars(10);
+    
+    % Linear state transformations to capture compartment pressures
+    Ppv = (Vpv - data.parsG.VpvU) ./ Cpv;
+    Psa = (Vsa - data.parsG.VsaU) ./ Csa;
+    Psv = (Vsv - data.parsG.VsvU) ./ Csv;
+    Ppa = (Vpa - data.parsG.VpaU) ./ Cpa;
+    
+    % Reconstruct historical baseline elastance arrays for both ventricles
+    num_pts = length(Vpv);
+    Plv = zeros(1, num_pts); Prv = zeros(1, num_pts);
+    %t_local = (0:(num_pts-1)) * data.dt;
+    
+    for j = 1:num_pts
+        cycle_t = mod(t_hist(j), data.T);
+        Elv = Elastance(cycle_t, pars(11), pars(12), pars(15), pars(16));
+        Erv = Elastance(cycle_t, pars(13), pars(14), pars(15), pars(16));
+        Plv(j) = Elv * (Vlv(j) - data.parsG.VlvU);
+        Prv(j) = Erv * (Vrv(j) - data.parsG.VrvU);
+    end
+    
+    % Directional valve flow equations
+    Qpul  = (Ppa - Ppv) / Rpul;
+    Qsys  = (Psa - Psv) / Rsys;
+    Qmval = (Ppv - Plv) / Rmval; 
+    Qaval = (Plv - Psa) / Raval;
+    Qtval = (Psv - Prv) / Rtval;
+    Qpval = (Prv - Ppa) / Rpval;
+    
+    % Force valve constraints
+    Qmval(Qmval < 0) = 0; Qaval(Qaval < 0) = 0; Qtval(Qtval < 0) = 0; Qpval(Qpval < 0) = 0;
+    
+    % Calculate net continuous derivative state vectors
+    dVpv = Qpul  - Qmval;
+    dVlv = Qmval - Qaval;
+    dVsa = Qaval - Qsys;
+    dVsv = Qsys  - Qtval;
+    dVrv = Qtval - Qpval;
+    dVpa = Qpval - Qpul;
+end

@@ -1,0 +1,62 @@
+\documentclass[landscape]{article}
+
+% Page layout
+\usepackage[margin=1in]{geometry}   % 1-inch margins
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{pgffor} % Required for the \foreach loop
+
+
+\setlength{\parindent}{0pt}         % No paragraph indentation
+\setlength{\parskip}{0.25em}        % Space between paragraphs
+\raggedbottom   
+
+% Define a safe macro to handle the logic for each patient
+\long\def\processpatient#1{%
+    \ifnum#1=3\relax
+        % Skip 3
+    \else\ifnum#1=111\relax
+        % Skip 111
+    \else\ifnum#1=178\relax
+        % Skip 178
+    \else\ifnum#1=228\relax
+        % Skip 228
+    \else
+        % If it is none of the numbers above, compile the page normally
+        \begin{figure}[p] 
+            \centering
+            \includegraphics[width=\linewidth, height=12cm, keepaspectratio]{Patient_#1}
+            \caption{Patient #1}
+            \label{fig:patient-#1}
+        \end{figure}
+        \clearpage
+    \fi\fi\fi\fi % You need one \fi for every \ifnum opened
+}
+
+\begin{document}
+
+% Define the path to your images folders
+\graphicspath{{/Users/sillouz2/Documents/MATLAB/RunModel 5/PatientFiguresOpt}}
+
+\title{Patient Plots Catalog}
+\author{Logan L, Charlotte B, Simon I, Noah R, Morgan S}
+\date{\today}
+\maketitle
+\maketitle % Generates the title on the first page
+
+% ==========================================
+% 1. FIRST PATIENT (Placed on the title page)
+% ==========================================
+\begin{figure}[h!] 
+    \centering
+    \includegraphics[width=\linewidth, height=10cm, keepaspectratio]{Patient_1}
+    \caption{Patient 1}
+    \label{fig:patient-1}
+\end{figure}
+\clearpage % Starts a fresh page ONLY AFTER the first patient is printed
+
+\foreach \j in {1,...,343} {
+    \processpatient{\j}
+}
+
+\end{document}
