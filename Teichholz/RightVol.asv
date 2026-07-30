@@ -1,0 +1,503 @@
+function RightVol(PIDs)
+close all;
+
+% SET UP AND CALCULATIONS
+% Preallocate empty vectors
+VolD_vec = []; % vector to store MRI max volumes, RV
+VolS_vec = []; % vector to store MRI min volumes, RV
+IDlvD_vec = []; % vector to store max inner diameter from TTE data, LV
+IDlvS_vec = []; % vector to store min inner diameter from TTE data, LV
+PsaS_vec = []; % vector to store systemic pressure of SA
+PrvS_vec = []; % vector to store system pressure of RV
+SV_vec = []; % vector to store SV 
+
+VlvS = []; % vector to store LV systolic vol, mL
+VlvD = []; % vector to store LV diastolic vol, mL
+
+
+% Change directory to extract patient data
+cd ../Core/
+
+% Extract patient data
+for k = 1:length(PIDs)
+    PID = PIDs(k);  
+        data = Patient(PID, 0);
+
+        % Store MRI max and min volumes to vectors
+        VolD_vec(k) = data.VrvM;
+        VolS_vec(k) = data.VrvmT;
+    
+        % Store TTE max and min volumes to vectors
+        IDlvD_vec(k) = data.IDlvD; % inner diameter at its largest during diastole, measured in cm
+        IDlvS_vec(k) = data.IDlvS; % inner diameter at its largest during systole, measured in cm
+
+        % Store pressures and SV to vectors
+        PsaS_vec(k) = data.PsaS; 
+        PrvS_vec(k) = data.PrvS;
+        SV_vec(k) = data.SV;
+
+        % Store LV volumes
+        VlvS(k) = data.VlvmT;
+        VlvD(k) = data.VlvM;
+end
+
+% Return to Teichholz directory
+cd ../Teichholz/
+
+% Check that vector entries are okay
+good = ~isnan(VolD_vec) & ~isnan(VolS_vec) & ~isnan(IDlvD_vec) & ~isnan(IDlvS_vec) & ~isnan(PsaS_vec) & ~isnan(PrvS_vec) & ~isnan(SV_vec) & ~isnan(VlvS) & ~isnan(VlvD) ...
+       & VolD_vec > 0 & VolS_vec > 0 & IDlvD_vec > 0 & IDlvS_vec > 0 & PsaS_vec > 0 & PrvS_vec > 0 & SV_vec > 0 & VlvS > 0 & VlvD > 0;
+VolD_vec = VolD_vec(good);
+VolS_vec = VolS_vec(good);
+IDlvD_vec = IDlvD_vec(good);
+IDlvS_vec = IDlvS_vec(good);
+PsaS_vec = PsaS_vec(good);
+PrvS_vec = PrvS_vec(good);
+SV_vec = SV_vec(good);
+VlvS = VlvS(good);
+VlvD = VlvD(good);
+
+% Calculate LV volume
+a = 7.2468;
+b = 16.7757;
+VlvM = a.*IDlvD_vec.^2+b;
+Vlvm = a.*IDlvS_vec.^2+b;
+
+% Conduct calculations for RV volume
+PlvS = 1.025.*PsaS_vec;
+VrvM = [];
+Vrvm = [];
+for i = 1:length(PlvS)
+    if PlvS(i) < 120
+        FactorLP = 1;
+    else 
+        FactorLP = PlvS(i)/120;
+    end
+    FactorRP = PrvS_vec(i)/25;
+    FactorP = FactorRP/FactorLP;
+    FactorV = (125/VlvM(i));
+    VrvM(i) = VlvM(i) * FactorP * FactorV;
+    Vrvm(i) = VrvM(i) - SV_vec(i);
+end
+
+% Combine vectors 
+posIdx = Vrvm > 0;
+Vrvm = Vrvm(posIdx);
+VolS_vecO = VolS_vec(posIdx);
+Vrv_realO = [VolD_vec, VolS_vecO];
+Vrv_calc = [VrvM, Vrvm];
+
+% Regression
+coeffs_lin = polyfit(Vrv_calc, Vrv_realO, 1);
+coeffs_quad = polyfit(Vrv_calc, Vrv_realO, 2);
+
+% Sort to plot
+[Vrv_sort, sortIdx] = sort(Vrv_calc);
+
+% Bland-Altman Plot
+avg = (Vrv_realO+Vrv_calc)/2;
+diff = Vrv_realO - Vrv_calc;
+bias = mean(diff);
+sdDiff = std(diff);
+uLOA = bias + (1.96*sdDiff);
+lLOA = bias - (1.96*sdDiff);
+
+% R^2 Calculations
+mdl_lin = fitlm(Vrv_calc, Vrv_realO);
+R2_lin = mdl_lin.Rsquared.Ordinary;
+fprintf('Coefficient of Determination for Linear Fit: %.4f\n', R2_lin);
+
+mdl_quad = fitlm(Vrv_calc, Vrv_realO, 'purequadratic');
+R2_quad = mdl_quad.Rsquared.Ordinary;
+fprintf('Coefficient of Determination for Quadratic Fit: %.4f\n', R2_quad);
+
+% Plots
+figure(1); % scatter plot
+    C = [ones(size(VrvM)), 2*ones(size(Vrvm))];
+    scatter(Vrv_calc, Vrv_realO, 36, C, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    hold on;
+    yfit_lin = polyval(coeffs_lin, Vrv_sort);
+    yfit_quad = polyval(coeffs_quad, Vrv_sort);
+    reg_lin = plot(Vrv_sort, yfit_lin, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    reg_quad = plot(Vrv_sort, yfit_quad, 'b', 'LineWidth', 2, 'LineStyle', '-');
+    d = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0 0 0.5], 'MarkerEdgeColor', 'none');
+    h = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0.5 0.5 1], 'MarkerEdgeColor', 'none');
+    hold off;
+    title('Calculating RV from LV', 'FontSize', 15);
+    xlabel('TTE Volume (mL)', 'FontSize', 15);
+    ylabel('MRI Volume (mL)', 'FontSize', 15);
+    legend([d, h, reg_lin, reg_quad], ...
+           {'RV Dias', 'RV Sys', 'Linear Regression', 'Quadratic Regression'}, ...
+           'Location', 'southeast', 'FontSize', 10);
+    regText = sprintf('R^2 for Linear = %.4f\nR^2 for Quadratic = %.4f', R2_lin, R2_quad);
+    slopeText = sprintf('y = %.4fx+%.4f\ny = %.4fx^2+%.4fx+%.4f', coeffs_lin(1), coeffs_lin(2), coeffs_quad(1), coeffs_quad(2), coeffs_quad(3));
+    annotation('textbox', [.15 .7 .15 .13], 'String', regText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+    annotation('textbox', [.15 .6 .15 .13], 'String', slopeText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+figure(2); % Bland-Altman Plot & Box and Whisker Plot
+subplot(1,2,1); % Bland-Altman
+    scatter(avg, diff, 50, C, 'filled', 'MarkerEdgeColor', 'k');
+    colormap([0 0 0.5; ... 
+          0.5 0.5 1]);
+    hold on;
+    xlims = xlim;
+    line(xlims, [bias, bias], 'Color', 'r', 'LineStyle', '-', 'LineWidth', 2);
+    line(xlims, [uLOA, uLOA], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    line(xlims, [lLOA, lLOA], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    text(xlims(2)*0.75, bias + (max(diff)*0.05), sprintf('Bias: %.2f', bias), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, uLOA + (max(diff)*0.05), sprintf('+1.96 SD: %.2f', uLOA), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, lLOA - (max(diff)*0.05), sprintf('-1.96 SD: %.2f', lLOA), 'Color', 'r', 'FontSize', 10);
+    grid on;
+    pd = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0 0 0.5]);
+    ps = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0.5 0.5 1]);
+    xlabel('Mean of MRI and TTE Values', 'FontSize', 15);
+    ylabel('Difference Between MRI and TTE', 'FontSize', 15);
+    title('Bland-Altman Plot for Calculated RV from LV', 'FontSize', 15);
+    legend([pd, ps], ...
+           {'RV Dias', 'RV Sys'}, ...
+           'Location','southwest', 'FontSize', 10);
+    hold off;
+subplot(1,2,2); % Box and Whisker Plot
+    bW = boxplot(diff);
+    title('Box and Whisker Plot for Calculated RV from LV');
+    set(bW, 'LineWidth', 2);
+
+%% Trying different methods to calculate RV from LV
+guess_lin = [1,0];
+guess_quad = [1,0];
+
+pars_lin = fminsearch(@(p) errorL(p, VlvM, Vlvm, VolD_vec, VolS_vec), guess_lin);
+pl_a = pars_lin(1);
+pl_b = pars_lin(2);
+% fprintf('Vrv = aVlv + b, a = %.4f, b = %.4f', pl_a, pl_b);
+
+pars_quad = fminsearch(@(p) errorQ(p, VlvM, Vlvm, VolD_vec, VolS_vec), guess_quad);
+pq_a = pars_quad(1);
+pq_b = pars_quad(2);
+% fprintf('Vrv = aVlv^2 + b, a = %.4f, b = %.4f', pq_a, pq_b);
+
+VdiasL = pl_a.*VlvM+pl_b;
+VsysL = pl_a.*Vlvm+pl_b;
+VL = [VdiasL, VsysL];
+
+VdiasQ = pq_a.*VlvM.^2+pq_b;
+VsysQ = pq_a.*Vlvm.^2+pq_b;
+VQ = [VdiasQ, VsysQ];
+
+Vrv_real = [VolD_vec, VolS_vec];
+
+% Regression
+coeffsL_lin = polyfit(VL, Vrv_real, 1);
+coeffsL_quad = polyfit(VL, Vrv_real, 2);
+coeffsQ_lin = polyfit(VQ, Vrv_real, 1);
+coeffsQ_quad = polyfit(VQ, Vrv_real, 2);
+
+[VL_sort, sortIdxL] = sort(VL);
+[VQ_sort, sortIdxQ] = sort(VQ);
+
+% Information for Bland-Altman plots
+avgL = (VL + Vrv_real)/2;
+diffL = Vrv_real - VL;
+biasL = mean(diffL);
+sdDiffL = std(diffL);
+uLOAL = biasL + (1.96*sdDiffL);
+lLOAL = biasL - (1.96*sdDiffL);
+
+avgQ = (VQ + Vrv_real)/2;
+diffQ = Vrv_real - VQ;
+biasQ = mean(diffQ);
+sdDiffQ = std(diffQ);
+uLOAQ = biasQ + (1.96*sdDiffQ);
+lLOAQ = biasL - (1.96*sdDiffQ);
+
+% R^2 Calculations
+disp('R^2 Values for Vrv = aVlv + b')
+mdl_linL = fitlm(VL, Vrv_real);
+R2_linL = mdl_linL.Rsquared.Ordinary;
+mdl_quadL = fitlm(VL, Vrv_real, 'purequadratic');
+R2_quadL = mdl_quadL.Rsquared.Ordinary;
+fprintf('Coefficient of Determination for Linear Fit: %4.f\n Coefficient of Determination for Quadratic Fit: %.4f\n', ...
+    R2_linL, R2_quadL);
+
+disp('R^2 Values for Vrv = aVlv^2 + b')
+mdl_linQ = fitlm(VQ, Vrv_real);
+R2_linQ = mdl_linQ.Rsquared.Ordinary;
+mdl_quadQ = fitlm(VQ, Vrv_real, 'purequadratic');
+R2_quadQ = mdl_quadQ.Rsquared.Ordinary;
+fprintf('Coefficient of Determination for Linear Fit: %4.f\n Coefficient of Determination for Quadratic Fit: %.4f\n', ...
+    R2_linQ, R2_quadQ);
+
+% Figures for V = aV+b
+figure(3); % scatter plot
+    CL = [ones(size(VdiasL)), 2*ones(size(VsysL))];
+    scatter(VL, Vrv_real, 36, CL, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    hold on;
+    yfitL_lin = polyval(coeffsL_lin, VL_sort);
+    yfitL_quad = polyval(coeffsL_quad, VL_sort);
+    regL_lin = plot(VL_sort, yfitL_lin, 'b', 'LineWidth', 2, 'LineStyle', '-');
+    regL_quad = plot(VL_sort, yfitL_quad, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    dL = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0 0 0.5], 'MarkerEdgeColor', 'none');
+    hL = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0.5 0.5 1], 'MarkerEdgeColor', 'none');
+    hold off;
+    title('V_{rv} = aV_{lv}+b', 'FontSize', 15);
+    xlabel('RV Volume from LV Volume (mL)', 'FontSize', 15);
+    ylabel('MRI Volume (mL)', 'FontSize', 15);
+    legend([dL, hL, regL_lin, regL_quad], ...
+           {'RV Dias', 'RV Sys', 'Linear Regression', 'Quadratic Regression'}, ...
+           'Location', 'southeast', 'FontSize', 10);
+    regText = sprintf('R^2 for Linear = %.4f\nR^2 for Quadratic = %.4f', R2_linL, R2_quadL);
+    slopeText = sprintf('y = %.4fx+%.4f\ny = %.4fx^2+%.4fx+%.4f', coeffsL_lin(1), coeffsL_lin(2), coeffsL_quad(1), coeffsL_quad(2), coeffsL_quad(3));
+    annotation('textbox', [.15 .7 .15 .13], 'String', regText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+    annotation('textbox', [.15 .6 .15 .13], 'String', slopeText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+figure(4);
+subplot(1,2,1); % bland-altman plot
+    scatter(avgL, diffL, 50, CL, 'filled', 'MarkerEdgeColor', 'k');
+    colormap([0 0 0.5; ... 
+          0.5 0.5 1]);
+    hold on;
+    xlims = xlim;
+    line(xlims, [biasL, biasL], 'Color', 'r', 'LineStyle', '-', 'LineWidth', 2);
+    line(xlims, [uLOAL, uLOAL], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    line(xlims, [lLOAL, lLOAL], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    text(xlims(2)*0.75, biasL + (max(diffL)*0.05), sprintf('Bias: %.2f', biasL), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, uLOAL + (max(diffL)*0.05), sprintf('+1.96 SD: %.2f', uLOAL), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, lLOAL - (max(diffL)*0.05), sprintf('-1.96 SD: %.2f', lLOAL), 'Color', 'r', 'FontSize', 10);
+    grid on;
+    pdL = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0 0 0.5]);
+    psL = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0.5 0.5 1]);
+    xlabel('Mean of MRI and Calculated Values', 'FontSize', 15);
+    ylabel('Difference Between MRI and Calculated', 'FontSize', 15);
+    title('Bland-Altman Plot for V_{rv} = aV_{lv}+b', 'FontSize', 15);
+    legend([pdL, psL], ...
+           {'RV Dias', 'RV Sys'}, ...
+           'Location','southwest', 'FontSize', 10);
+    hold off;
+subplot(1,2,2); % box and whiskers plot
+    bL = boxplot(diffL);
+    title('Box and Whisker Plot for V_{rv} = aV_{lv}+b');
+    set(bL, 'LineWidth', 2);
+
+% Figures for V = aV^2+b
+figure(5); % scatter plot
+    CQ = [ones(size(VdiasQ)), 2*ones(size(VsysQ))];
+    scatter(VQ, Vrv_real, 36, CQ, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    hold on;
+    yfitQ_lin = polyval(coeffsQ_lin, VQ_sort);
+    yfitQ_quad = polyval(coeffsQ_quad, VQ_sort);
+    regQ_lin = plot(VQ_sort, yfitQ_lin, 'b', 'LineWidth', 2, 'LineStyle', '-');
+    regQ_quad = plot(VQ_sort, yfitQ_quad, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    dQ = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0 0 0.5], 'MarkerEdgeColor', 'none');
+    hQ = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0.5 0.5 1], 'MarkerEdgeColor', 'none');
+    hold off;
+    title('V_{rv} = aV_{lv}^2+b', 'FontSize', 15);
+    xlabel('RV Volume from LV Volume (mL)', 'FontSize', 15);
+    ylabel('MRI Volume (mL)', 'FontSize', 15);
+    legend([dQ, hQ, regQ_lin, regQ_quad], ...
+           {'RV Dias', 'RV Sys', 'Linear Regression', 'Quadratic Regression'}, ...
+           'Location', 'southeast', 'FontSize', 10);
+    regText = sprintf('R^2 for Linear = %.4f\nR^2 for Quadratic = %.4f', R2_linQ, R2_quadQ);
+    slopeText = sprintf('y = %.4fx+%.4f\ny = %.4fx^2+%.4fx+%.4f', coeffsQ_lin(1), coeffsQ_lin(2), coeffsQ_quad(1), coeffsQ_quad(2), coeffsQ_quad(3));
+    annotation('textbox', [.15 .7 .15 .13], 'String', regText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+    annotation('textbox', [.15 .6 .15 .13], 'String', slopeText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+figure(6);
+subplot(1,2,1); % bland-altman plot
+    scatter(avgQ, diffQ, 50, CQ, 'filled', 'MarkerEdgeColor', 'k');
+    colormap([0 0 0.5; ... 
+          0.5 0.5 1]);
+    hold on;
+    xlims = xlim;
+    line(xlims, [biasQ, biasQ], 'Color', 'r', 'LineStyle', '-', 'LineWidth', 2);
+    line(xlims, [uLOAQ, uLOAQ], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    line(xlims, [lLOAQ, lLOAQ], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    text(xlims(2)*0.75, biasQ + (max(diffQ)*0.05), sprintf('Bias: %.2f', biasQ), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, uLOAQ + (max(diffQ)*0.05), sprintf('+1.96 SD: %.2f', uLOAQ), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, lLOAQ - (max(diffQ)*0.05), sprintf('-1.96 SD: %.2f', lLOAQ), 'Color', 'r', 'FontSize', 10);
+    grid on;
+    pdQ = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0 0 0.5]);
+    psQ = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0.5 0.5 1]);
+    xlabel('Mean of MRI and Calculated Values', 'FontSize', 15);
+    ylabel('Difference Between MRI and Calculated', 'FontSize', 15);
+    title('Bland-Altman Plot for V_{rv} = aV_{lv}^2+b', 'FontSize', 15);
+    legend([pdQ, psQ], ...
+           {'RV Dias', 'RV Sys'}, ...
+           'Location','southwest', 'FontSize', 10);
+    hold off;
+subplot(1,2,2); % box and whiskers plot
+    bQ = boxplot(diffQ);
+    title('Box and Whisker Plot for V_{rv} = aV_{lv}^2+b');
+    set(bQ, 'LineWidth', 2);
+
+%% Minimizing distance using inner diameter
+guess = 1;
+par = fminsearch(@(p) diameter(p, IDlvS_vec, IDlvD_vec, VolS_vec, VolD_vec), guess);
+par_a = par(1);
+
+IDrvS_vec = par_a.*IDlvS_vec;
+IDrvD_vec = par_a.*IDlvD_vec;
+
+VolS = a.*IDrvS_vec.^2+b;
+VolD = a.*IDrvD_vec.^2+b;
+Vol = [VolD, VolS];
+
+% Regression
+coeffsD_lin = polyfit(Vol, Vrv_real, 1);
+coeffsD_quad = polyfit(Vol, Vrv_real, 2);
+[Vol_sort, sortIdx] = sort(Vol);
+
+disp('R^2 Values When Minimizing Distance Using Inner Diameter');
+mdl_linD = fitlm(Vol, Vrv_real);
+R2_linD = mdl_linD.Rsquared.Ordinary;
+mdl_quadD = fitlm(Vol, Vrv_real, 'purequadratic');
+R2_quadD = mdl_quadD.Rsquared.Ordinary;
+fprintf('Linear R^2: %.4f\n Quadratic R^2: %.4f\n', R2_linD, R2_quadD);
+
+% Bland-Altman Plot Information
+avgD = (Vol+Vrv_real)/2;
+diffD = Vrv_real - Vol;
+biasD = mean(diffD);
+sdDiffD = std(diffD);
+uLOAD = biasD + 1.96*sdDiffD;
+lLOAD = biasD - 1.96*sdDiffD;
+
+% Plots
+figure(7); % scatter plot
+    CD = [ones(size(VolD)), 2*ones(size(VolS))];
+    scatter(Vol, Vrv_real, 36, CD, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    hold on;
+    yfitD_lin = polyval(coeffsD_lin, Vol_sort);
+    yfitD_quad = polyval(coeffsD_quad, Vol_sort);
+    regD_lin = plot(Vol_sort, yfitD_lin, 'b', 'LineWidth', 2, 'LineStyle', '-');
+    regD_quad = plot(Vol_sort, yfitD_quad, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    dD = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0 0 0.5], 'MarkerEdgeColor', 'none');
+    hD = plot(NaN, NaN, 'o', 'MarkerFaceColor', [0.5 0.5 1], 'MarkerEdgeColor', 'none');
+    hold off;
+    title('Minimizing Distance Using Inner Diameter', 'FontSize', 15);
+    xlabel('RV Volume from LV Volume (mL)', 'FontSize', 15);
+    ylabel('MRI Volume (mL)', 'FontSize', 15);
+    legend([dD, hD, regD_lin, regD_quad], ...
+           {'RV Dias', 'RV Sys', 'Linear Regression', 'Quadratic Regression'}, ...
+           'Location', 'southeast', 'FontSize', 10);
+    regText = sprintf('R^2 for Linear = %.4f\nR^2 for Quadratic = %.4f', R2_linD, R2_quadD);
+    slopeText = sprintf('y = %.4fx+%.4f\ny = %.4fx^2+%.4fx+%.4f', coeffsD_lin(1), coeffsD_lin(2), coeffsD_quad(1), coeffsD_quad(2), coeffsD_quad(3));
+    annotation('textbox', [.15 .7 .15 .13], 'String', regText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+    annotation('textbox', [.15 .6 .15 .13], 'String', slopeText, 'FitBoxToText', 'on', 'BackgroundColor', 'w', 'FontSize', 10);
+figure(8);
+subplot(1,2,1); % bland-altman plot
+    scatter(avgD, diffD, 50, CD, 'filled', 'MarkerEdgeColor', 'k');
+    colormap([0 0 0.5; ... 
+          0.5 0.5 1]);
+    hold on;
+    xlims = xlim;
+    line(xlims, [biasD, biasD], 'Color', 'r', 'LineStyle', '-', 'LineWidth', 2);
+    line(xlims, [uLOAD, uLOAD], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    line(xlims, [lLOAD, lLOAD], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+    text(xlims(2)*0.75, biasD + (max(diffD)*0.05), sprintf('Bias: %.2f', biasD), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, uLOAD + (max(diffD)*0.05), sprintf('+1.96 SD: %.2f', uLOAD), 'Color', 'r', 'FontSize', 10);
+    text(xlims(2)*0.75, lLOAD - (max(diffD)*0.05), sprintf('-1.96 SD: %.2f', lLOAD), 'Color', 'r', 'FontSize', 10);
+    grid on;
+    pdD = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0 0 0.5]);
+    psD = plot(NaN, NaN, 'ko', 'MarkerFaceColor', [0.5 0.5 1]);
+    xlabel('Mean of MRI and Calculated Values', 'FontSize', 15);
+    ylabel('Difference Between MRI and Calculated', 'FontSize', 15);
+    title('Bland-Altman Plot', 'FontSize', 15);
+    legend([pdD, psD], ...
+           {'RV Dias', 'RV Sys'}, ...
+           'Location','southwest', 'FontSize', 10);
+    hold off;
+subplot(1,2,2); % box and whisker plot
+    bD = boxplot(diffD);
+    title('Box and Whisker Plot');
+    set(bD, 'LineWidth', 2);
+sgtitle('Minimizing Distance Using Inner Diameter');
+
+%% Plotting to see possible relationships
+VolR = [VolS_vec, VolD_vec];
+VolL = [VlvS, VlvD];
+
+figure(9);
+CP = [ones(size(VlvS)), 2*ones(size(VlvD))];
+subplot(2,2,1);
+    scatter(VolL, VolR, 36, CP, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    lin = polyfit(VolL, VolR, 1);
+    linfit = polyval(lin, sort(VolL));
+    hold on;
+    plot(sort(VolL), linfit, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    ylabel('RV Volume (mL)');
+    title('Linear')
+    hold off;
+subplot(2,2,2);
+    scatter(log(VolL), VolR, 36, CP, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    logx = polyfit(log(VolL), VolR, 1);
+    logxfit = polyval(logx, log(sort(VolL)));
+    hold on;
+    plot(log(sort(VolL)), logxfit, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    title('log(x)')
+    hold off;
+subplot(2,2,3);
+    scatter(VolL, log(VolR), 36, CP, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    logy = polyfit(VolL, log(VolR), 1);
+    logyfit = polyval(logy, sort(VolL));
+    hold on;
+    plot(sort(VolL), logyfit, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    xlabel('LV Volume (mL)');
+    ylabel('RV Volume (mL)');
+    title('log(y)')
+    hold off;
+subplot(2,2,4);
+    scatter(log(VolL), log(VolR), 36, CP, 'filled');
+    colormap([0 0 0.5; 0.5 0.5 1]);
+    logboth = polyfit(log(VolL), log(VolR), 1);
+    logbfit = polyval(logboth, log(sort(VolL)));
+    hold on;
+    plot(log(sort(VolL)), logbfit, 'r', 'LineWidth', 2, 'LineStyle', '-');
+    xlabel('LV Volume (mL)');
+    title('log both')
+    hold off;
+
+% R^2 Values
+mdl_lin = fitlm(Vrv_calc, Vrv_realO);
+R2_lin = mdl_lin.Rsquared.Ordinary;
+fprintf('Coefficient of Determination for Linear Fit: %.4f\n', R2_lin);
+linmdl = fitlm()
+
+
+end
+    
+
+%% Nested Subfuctions
+% function for minimizing error between linear calculations and measurements
+function sseL = errorL(params, VlvM, Vlvm, VolD_real, VolS_real)
+    a = params(1);
+    b = params(2);
+    Vol_real = [VolD_real, VolS_real];
+    Vlv = [VlvM, Vlvm];
+    Vol_calc = a.*Vlv+b;
+    sseL = sum((Vol_real - Vol_calc).^2);
+end
+
+% function for minimizing error between quadratic calculations and measurements
+function sseQ = errorQ(params, VlvM, Vlvm, VolD_real, VolS_real)
+    a = params(1);
+    b = params(2);
+    Vol_real = [VolD_real, VolS_real];
+    Vlv = [VlvM, Vlvm];
+    Vol_calc = a.*Vlv+b;
+    sseQ = sum((Vol_real - Vol_calc).^2);
+end
+
+% function for minimizing error between calculations and measurements when
+% looking at diameter
+function sseD = diameter(params, IDlvS, IDlvD, VolD_real, VolS_real)
+    a = params(1);
+    Vol_real = [VolD_real, VolS_real];
+    IDlv = [IDlvD, IDlvS];
+    IDrv = a.*IDlv;
+    Vol_calc = 7.2468*IDrv.^2 + 16.7757;
+    sseD = sum((Vol_real - Vol_calc).^2);
+end
